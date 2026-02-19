@@ -12,7 +12,15 @@ def health():
 
 @app.post("/webhook/github")
 async def github_webhook(request: Request, x_github_event: str = Header(None)):
-    payload = await request.json()
+    # Safely parse body — GitHub sends a ping with minimal/empty body on setup
+    try:
+        payload = await request.json()
+    except Exception:
+        return {"status": "ignored", "reason": "empty or invalid body"}
+
+    # GitHub ping event (sent when webhook is first created)
+    if x_github_event == "ping":
+        return {"status": "pong"}
 
     # PR Event
     if x_github_event == "pull_request":
