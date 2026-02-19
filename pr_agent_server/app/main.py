@@ -1,24 +1,61 @@
-from fastapi import FastAPI
-from pydantic import BaseModel
-from typing import List
-from app.tools.pr_template import suggest_pr_template  # your tool
+from fastapi import FastAPI, Request, Header
+from app.tools.pr_template import suggest_pr_template
+from app.tools.ci_summary import summarize_ci
+from app.integrations.github import get_changed_files
+from app.integrations.slack import send_slack_message
 
 app = FastAPI(title="PR Agent Workflow Server")
 
-# Pydantic model
-class PRRequest(BaseModel):
-    changed_files: List[str]
-
-# Health check
 @app.get("/")
-def health_check():
-    return {"status": "PR Agent MCP Server Running"}
+def health():
+    return {"status": "PR Agent Running"}
 
-# POST endpoint with JSON body
-@app.post("/analyze-pr")
-async def analyze_pr(data: PRRequest):
-    """
-    Analyze PR and suggest a template based on changed files.
-    """
-    template = suggest_pr_template(data.changed_files)
-    return {"suggested_template": template}
+@app.post("/webhook/github")
+async def github_webhook(request: Request, x_github_event: str = Header(None)):
+    # Safely parse body — GitHub sends a ping with minimal/empty body on setup
+    try:
+        payload = await request.json()
+    except Exception:
+        return {"status": "ignored", "reason": "empty or invalid body"}
+
+    # GitHub ping event (sent when webhook is first created)
+    if x_github_event == "ping":
+        return {"status": "pong"}
+
+    # PR Event
+    if x_github_event == "pull_request":
+        pr = payload["pull_request"]
+        repo = payload["repository"]["full_name"]
+        pr_number = pr["number"]
+        author = pr["user"]["login"]
+
+        changed_files = get_changed_files(repo, pr_number)
+        template = suggest_pr_template(changed_files)
+
+        message = f"""
+🚀 New PR #{pr_number} by {author}
+📁 Suggested Template: {template}
+Files Changed:
+{chr(10).join(changed_files)}
+"""
+
+        send_slack_message(message)
+
+        return {"status": "PR processed"}
+
+    # CI Event
+    if x_github_event == "workflow_run":
+        workflow = payload["workflow_run"]["name"]
+        status = payload["workflow_run"]["conclusion"]
+
+        summary = summarize_ci(workflow, status)
+
+        send_slack_message(f"⚙️ CI Update:\n{summary}")
+
+        return {"status": "CI processed"}
+
+    return {"status": "ignored"}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
