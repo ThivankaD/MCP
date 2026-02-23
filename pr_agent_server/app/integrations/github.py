@@ -1,46 +1,53 @@
-import requests
 import os
+import requests
 from dotenv import load_dotenv
 
 load_dotenv()
 
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 
-def get_changed_files(repo_full_name: str, pr_number: int) -> list[str]:
-    """Fetch the list of changed file paths for a given PR from GitHub API."""
-    headers = {
-        "Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
-        "Accept": "application/vnd.github+json"
-    }
-    files_url = f"https://api.github.com/repos/{repo_full_name}/pulls/{pr_number}/files"
-    response = requests.get(files_url, headers=headers)
-    response.raise_for_status()
-    return [f["filename"] for f in response.json()]
+_HEADERS = {
+    "Authorization": f"Bearer {GITHUB_TOKEN}",
+    "Accept": "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+}
 
 
-def handle_pull_request_event(payload):
-    action = payload["action"]
+def get_push_diff(repo_full_name: str, base_sha: str, head_sha: str) -> str:
+    """
+    Fetch the unified diff between two commits using the GitHub Compare API.
+    Returns the raw diff string (truncated to 6000 chars to stay within LLM limits).
+    """
+    url = f"https://api.github.com/repos/{repo_full_name}/compare/{base_sha}...{head_sha}"
+    headers = {**_HEADERS, "Accept": "application/vnd.github.v3.diff"}
 
-    if action != "opened":
-        return
+    try:
+        response = requests.get(url, headers=headers, timeout=15)
+        response.raise_for_status()
+        diff_text = response.text
 
-    pr_number = payload["pull_request"]["number"]
-    repo_full_name = payload["repository"]["full_name"]
+        # Truncate very large diffs to avoid LLM token limits
+        max_chars = 6000
+        if len(diff_text) > max_chars:
+            diff_text = diff_text[:max_chars] + "\n\n... [diff truncated for length] ..."
 
-    changed_files = get_changed_files(repo_full_name, pr_number)
+        return diff_text if diff_text.strip() else "(no diff available)"
 
-    # Choose template
-    from app.tools.pr_template import suggest_pr_template
-    template_name = suggest_pr_template(changed_files)
+    except requests.RequestException as e:
+        return f"(could not fetch diff: {e})"
 
-    # Read template from prompts folder
-    template_path = os.path.join("app", "prompts", template_name)
-    with open(template_path, "r") as f:
-        template_content = f.read()
 
-    # Update PR body via GitHub API
-    headers = {
-        "Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
-        "Accept": "application/vnd.github+json"
-    }
-    update_url = f"https://api.github.com/repos/{repo_full_name}/pulls/{pr_number}"
-    requests.patch(update_url, headers=headers, json={"body": template_content})
+def post_commit_comment(repo_full_name: str, commit_sha: str, body: str) -> bool:
+    """
+    Post a comment on a specific commit via the GitHub Commits API.
+    Returns True on success, False on failure.
+    """
+    url = f"https://api.github.com/repos/{repo_full_name}/commits/{commit_sha}/comments"
+
+    try:
+        response = requests.post(url, headers=_HEADERS, json={"body": body}, timeout=15)
+        response.raise_for_status()
+        return True
+    except requests.RequestException as e:
+        print(f"[GitHub] Failed to post commit comment: {e}")
+        return False

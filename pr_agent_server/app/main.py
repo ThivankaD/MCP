@@ -1,60 +1,80 @@
 from fastapi import FastAPI, Request, Header
-from app.tools.pr_template import suggest_pr_template
-from app.tools.ci_summary import summarize_ci
-from app.integrations.github import get_changed_files
+from app.integrations.github import get_push_diff, post_commit_comment
 from app.integrations.slack import send_slack_message
+from app.tools.llm_summarizer import summarize_diff
 
-app = FastAPI(title="PR Agent Workflow Server")
+app = FastAPI(title="Git Push Summarizer MCP Server")
+
 
 @app.get("/")
 def health():
-    return {"status": "PR Agent Running"}
+    return {"status": "Git Push Summarizer is running 🚀"}
+
 
 @app.post("/webhook/github")
 async def github_webhook(request: Request, x_github_event: str = Header(None)):
-    # Safely parse body — GitHub sends a ping with minimal/empty body on setup
+    """
+    Receives GitHub webhook events.
+    On 'push': fetches diff → LLM summary → GitHub commit comment + Slack notification.
+    """
     try:
         payload = await request.json()
     except Exception:
         return {"status": "ignored", "reason": "empty or invalid body"}
 
-    # GitHub ping event (sent when webhook is first created)
+    # Respond to GitHub's handshake ping
     if x_github_event == "ping":
         return {"status": "pong"}
 
-    # PR Event
-    if x_github_event == "pull_request":
-        pr = payload["pull_request"]
+    # Handle push event
+    if x_github_event == "push":
         repo = payload["repository"]["full_name"]
-        pr_number = pr["number"]
-        author = pr["user"]["login"]
+        branch = payload.get("ref", "").replace("refs/heads/", "")
+        pusher = payload.get("pusher", {}).get("name", "unknown")
+        before_sha = payload.get("before", "")
+        head_commit = payload.get("head_commit", {})
+        head_sha = head_commit.get("id", "")
+        commit_message = head_commit.get("message", "(no message)")
+        num_commits = len(payload.get("commits", []))
 
-        changed_files = get_changed_files(repo, pr_number)
-        template = suggest_pr_template(changed_files)
+        if not head_sha:
+            return {"status": "ignored", "reason": "no head commit"}
 
-        message = f"""
-🚀 New PR #{pr_number} by {author}
-📁 Suggested Template: {template}
-Files Changed:
-{chr(10).join(changed_files)}
-"""
+        # 1. Fetch unified diff between before → after
+        diff = get_push_diff(repo, before_sha, head_sha)
 
-        send_slack_message(message)
+        # 2. Generate LLM summary
+        summary = summarize_diff(
+            diff=diff,
+            pusher=pusher,
+            branch=branch,
+            commit_message=commit_message,
+            num_commits=num_commits,
+        )
 
-        return {"status": "PR processed"}
+        # 3. Post as a commit comment on GitHub
+        comment_body = (
+            f"## 🤖 AI Push Summary\n\n"
+            f"**Branch:** `{branch}` &nbsp;|&nbsp; "
+            f"**Pushed by:** `{pusher}` &nbsp;|&nbsp; "
+            f"**Commits:** {num_commits}\n\n"
+            f"{summary}"
+        )
+        post_commit_comment(repo, head_sha, comment_body)
 
-    # CI Event
-    if x_github_event == "workflow_run":
-        workflow = payload["workflow_run"]["name"]
-        status = payload["workflow_run"]["conclusion"]
+        # 4. Notify the team on Slack
+        slack_message = (
+            f"*📦 New Push to `{repo}` on `{branch}`*\n"
+            f"Pushed by *{pusher}* · {num_commits} commit(s)\n"
+            f"Latest commit: _{commit_message}_\n\n"
+            f"*Summary:*\n{summary}"
+        )
+        send_slack_message(slack_message)
 
-        summary = summarize_ci(workflow, status)
+        return {"status": "push processed", "repo": repo, "branch": branch}
 
-        send_slack_message(f"⚙️ CI Update:\n{summary}")
+    return {"status": "ignored", "event": x_github_event}
 
-        return {"status": "CI processed"}
-
-    return {"status": "ignored"}
 
 if __name__ == "__main__":
     import uvicorn
