@@ -1,5 +1,8 @@
 import requests
 import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 def get_changed_files(repo_full_name: str, pr_number: int) -> list[str]:
