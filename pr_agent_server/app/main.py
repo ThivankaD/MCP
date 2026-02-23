@@ -64,7 +64,7 @@ async def github_webhook(request: Request, x_github_event: str = Header(None)):
 
         # 4. Notify the team on Slack
         slack_message = (
-            f"*📦 New Push to `{repo}` on `{branch}`*\n"
+            f"*📌New Push to `{repo}` on `{branch}`*\n"
             f"Pushed by *{pusher}* · {num_commits} commit(s)\n"
             f"Latest commit: _{commit_message}_\n\n"
             f"*Summary:*\n{summary}"
