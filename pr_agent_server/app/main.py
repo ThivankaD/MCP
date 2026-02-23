@@ -54,7 +54,7 @@ async def github_webhook(request: Request, x_github_event: str = Header(None)):
 
         # 3. Post as a commit comment on GitHub
         comment_body = (
-            f"## 🤖 AI Push Summary\n\n"
+            f"##  Push Summary\n\n"
             f"**Branch:** `{branch}` &nbsp;|&nbsp; "
             f"**Pushed by:** `{pusher}` &nbsp;|&nbsp; "
             f"**Commits:** {num_commits}\n\n"
